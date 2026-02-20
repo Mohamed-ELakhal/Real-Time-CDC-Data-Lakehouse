@@ -408,7 +408,7 @@ All datetime handling uses explicit `'UTC'` timezone. Kafka engine tables have n
 ---
 
 ### Step 14 — Deploy Airflow + Gold DAG
-Airflow 2.9.3 via Helm (LocalExecutor). Creates the canonical `gold_user_activity` table and injects the 5-task DAG via ConfigMap.
+Airflow 2.9.3 via Helm (LocalExecutor). Creates the canonical `gold_user_activity` table and packages the DAG into a Kubernetes ConfigMap by reading `dags/gold_user_activity_dag.py` directly — no heredoc embedded in the shell script. If the DAG file is missing, step 14 exits with a clear error pointing to the expected path.
 
 ---
 
@@ -511,16 +511,49 @@ curl -s http://localhost:8083/connectors/postgres-connector/status | python3 -m 
 
 **ID:** `gold_user_activity` | **Schedule:** `@daily` (midnight UTC) | **Catchup:** `True` | **Max active runs:** `1`
 
+### DAG source file
+
+The DAG lives as a standalone Python file at `dags/gold_user_activity_dag.py`. It is completely decoupled from the deployment shell scripts — edit it directly whenever you need to change query logic, the schedule, retry settings, or task structure:
+
+```
+dags/
+└── gold_user_activity_dag.py    ← edit this file directly
+```
+
+Step 14 (`scripts/step-14-deploy-airflow.sh`) reads this file at deploy time and packages it into a Kubernetes ConfigMap that is mounted into Airflow's webserver and scheduler pods. No heredoc, no copy to `/tmp` — the script simply does:
+
+```bash
+kubectl create configmap airflow-dags -n airflow \
+    --from-file=gold_user_activity_dag.py=dags/gold_user_activity_dag.py
+```
+
+**To update the DAG after deployment:**
+
+```bash
+# 1. Edit the DAG file
+vim dags/gold_user_activity_dag.py
+
+# 2. Re-package it into the ConfigMap (Airflow picks it up within ~30s)
+kubectl delete configmap airflow-dags -n airflow
+kubectl create configmap airflow-dags -n airflow \
+    --from-file=gold_user_activity_dag.py=dags/gold_user_activity_dag.py
+
+# 3. Or simply re-run step 14 (idempotent — skips Helm if Airflow is already running)
+./startup.sh --only 14
+```
+
+### Task pipeline
+
 ```
 check_silver_data           ← fail-fast if silver tables empty (CDC stall detection)
         │
-create_gold_table           ← idempotent DDL
+create_gold_table           ← idempotent DDL (IF NOT EXISTS)
         │
 delete_existing_partition   ← DELETE WHERE activity_date=ds  (primary idempotency)
         │
 insert_gold_activity        ← LEFT JOIN silver FINAL, UTC-safe, NULL last_event_time
         │
-verify_gold_output          ← log results per user
+verify_gold_output          ← pretty-print per-user results to task log
         │
 optimize_silver_tables      ← OPTIMIZE FINAL (prevents FINAL query degradation)
 ```
@@ -670,7 +703,13 @@ Recommended: **12 GB free RAM**, **30 GB free disk**.
 ├── startup.sh                              ← Smart deploy (step 1 → 15, auto-skip)
 ├── cleanup.sh                              ← Teardown: light (keep cluster) or full
 ├── kind-cluster-config-light.yaml
-└── scripts/
+│
+├── dags/                                   ← Airflow DAG files (edit these directly)
+│   └── gold_user_activity_dag.py           ← Daily gold aggregation DAG
+│                                              Change queries, schedule, or tasks here.
+│                                              Step 14 reads this file at deploy time.
+│
+└── scripts/                                ← Infrastructure deployment steps
     ├── step-01-install-prerequisites.sh    ← Installs Docker, kubectl, Helm, Kind
     ├── step-02-preflight-checks.sh         ← Verifies RAM, disk, ports, Docker health
     ├── step-03-create-cluster.sh
@@ -684,6 +723,17 @@ Recommended: **12 GB free RAM**, **30 GB free disk**.
     ├── step-11-configure-debezium.sh
     ├── step-12-deploy-clickhouse.sh
     ├── step-13-create-silver-layer.sh
-    ├── step-14-deploy-airflow.sh
+    ├── step-14-deploy-airflow.sh           ← Reads dags/gold_user_activity_dag.py
     └── step-15-e2e-validate.sh
 ```
+
+### Why DAGs live separately from scripts
+
+Deployment scripts (`scripts/`) and DAG logic (`dags/`) change for completely different reasons and at different frequencies:
+
+| What changes | Why | Who changes it |
+|---|---|---|
+| `scripts/step-*.sh` | Infrastructure changes (K8s versions, Helm chart upgrades, new services) | DevOps / platform engineer |
+| `dags/gold_user_activity_dag.py` | Business logic (new metrics, schedule changes, extra tasks, ClickHouse query tuning) | Data engineer |
+
+Keeping them separate means a data engineer can change the aggregation SQL, add a new task, or adjust the retry policy by editing a single Python file — without ever opening a shell script. Step 14 always reads the current file contents at deploy time, so changes are picked up automatically on the next `./startup.sh --only 14` run.
