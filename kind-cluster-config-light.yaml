@@ -1,0 +1,55 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: data-engineering-challenge
+
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: 6443
+  kubeProxyMode: "iptables"
+
+nodes:
+  # Control plane node
+  - role: control-plane
+    kubeadmConfigPatches:
+    - |
+      kind: InitConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "ingress-ready=true"
+          system-reserved: "cpu=100m,memory=100Mi"
+          kube-reserved: "cpu=100m,memory=100Mi"
+          eviction-hard: "memory.available<200Mi,nodefs.available<10%"
+    extraPortMappings:
+    # PostgreSQL
+    - containerPort: 30432
+      hostPort: 5432
+      protocol: TCP
+    # MongoDB
+    - containerPort: 30017
+      hostPort: 27017
+      protocol: TCP
+    # Kafka Bootstrap
+    - containerPort: 30092
+      hostPort: 9092
+      protocol: TCP
+    # Kafka Connect
+    - containerPort: 30083
+      hostPort: 8083
+      protocol: TCP
+    # ClickHouse HTTP
+    - containerPort: 30123
+      hostPort: 8123
+      protocol: TCP
+    # ClickHouse Native
+    - containerPort: 30900
+      hostPort: 9000
+      protocol: TCP
+    # Airflow Web UI
+    - containerPort: 30080
+      hostPort: 8080
+      protocol: TCP
+
+  # Single worker node (all workloads)
+  - role: worker
+    labels:
+      workload: all-in-one
