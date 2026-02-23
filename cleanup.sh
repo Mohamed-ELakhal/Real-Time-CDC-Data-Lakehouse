@@ -389,6 +389,8 @@ clean_operators() {
 
 clean_kind_cluster() {
     log_sec "Step 3 — Kind Cluster"
+
+    # Delete the current cluster name
     if cluster_exists; then
         log_info "Deleting Kind cluster '${CLUSTER_NAME}'..."
         kind delete cluster --name "${CLUSTER_NAME}" 2>&1 || true
@@ -396,6 +398,17 @@ clean_kind_cluster() {
     else
         log_warn "Kind cluster '${CLUSTER_NAME}' not found — skipped."
     fi
+
+    # Also catch the legacy cluster name from before the project rename.
+    # If the user ran the old scripts, this cluster may still be alive
+    # and invisible to the guards above (which only check for cdc-lakehouse).
+    local LEGACY_NAME="data-engineering-challenge"
+    if kind get clusters 2>/dev/null | grep -q "^${LEGACY_NAME}$"; then
+        log_warn "Found legacy cluster '${LEGACY_NAME}' (old project name) — deleting..."
+        kind delete cluster --name "${LEGACY_NAME}" 2>&1 || true
+        log_ok "Legacy cluster '${LEGACY_NAME}' deleted."
+    fi
+
     echo ""
 }
 

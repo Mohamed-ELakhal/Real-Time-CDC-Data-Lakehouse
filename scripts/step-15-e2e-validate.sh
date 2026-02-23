@@ -275,20 +275,52 @@ else
         || echo "${TODAY}")
 
     echo "Triggering gold_user_activity for ${YESTERDAY}..."
-    kubectl exec "${AF_POD}" -n ${AF_NAMESPACE} -- \
-        airflow dags trigger gold_user_activity \
-        --exec-date "${YESTERDAY}T00:00:00+00:00" \
-        2>/dev/null && echo "✓ DAG triggered" \
-        || echo "⚠ Trigger may have failed — check Airflow UI"
+    # Use the Airflow REST API instead of CLI for two reasons:
+    #   1. `airflow dags list-runs --limit` flag does not exist in Airflow 2.9.3
+    #      causing the CLI to print top-level help and exit non-zero.
+    #   2. On retries, triggering the same logical_date via CLI fails hard.
+    #      The REST API returns 409 Conflict which we handle gracefully.
+    TRIGGER_RESULT=$(kubectl exec "${AF_POD}" -n ${AF_NAMESPACE} -- \
+        curl -s -o /tmp/trigger_out.json -w "%{http_code}" \
+        -X POST \
+        -u admin:admin \
+        -H "Content-Type: application/json" \
+        -d "{\"logical_date\": \"${YESTERDAY}T00:00:00+00:00\"}" \
+        "http://localhost:8080/api/v1/dags/gold_user_activity/dagRuns" 2>/dev/null)
+
+    if [ "$TRIGGER_RESULT" = "200" ] || [ "$TRIGGER_RESULT" = "201" ]; then
+        echo "✓ DAG triggered (HTTP ${TRIGGER_RESULT})"
+    elif [ "$TRIGGER_RESULT" = "409" ]; then
+        echo "✓ DAG run already exists for ${YESTERDAY} (from earlier attempt — OK)"
+    else
+        echo "⚠ Trigger returned HTTP ${TRIGGER_RESULT} — check Airflow UI"
+        kubectl exec "${AF_POD}" -n ${AF_NAMESPACE} -- \
+            cat /tmp/trigger_out.json 2>/dev/null | python3 -m json.tool 2>/dev/null || true
+    fi
 
     echo ""
     echo "Waiting 45s for DAG run to complete..."
     sleep 45
 
-    echo "Recent DAG runs:"
+    echo "Recent DAG runs (via REST API):"
     kubectl exec "${AF_POD}" -n ${AF_NAMESPACE} -- \
-        airflow dags list-runs -d gold_user_activity --limit 3 2>/dev/null \
-        || echo "  (check Airflow UI at http://localhost:8080)"
+        curl -s -u admin:admin \
+        "http://localhost:8080/api/v1/dags/gold_user_activity/dagRuns?limit=5&order_by=-start_date" \
+        2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    runs = d.get('dag_runs', [])
+    if not runs:
+        print('  (no runs found)')
+    for r in runs:
+        state = r.get('state', '?')
+        icon = '✓' if state == 'success' else ('⚠' if state == 'failed' else '…')
+        print(f\"  {icon} {r.get('dag_run_id','?')} | {state} | started: {r.get('start_date','?')}\")
+except Exception as e:
+    print(f'  (could not parse response: {e})')
+" 2>/dev/null || echo "  (check Airflow UI at http://localhost:8080)"
 fi
 echo ""
 
@@ -453,11 +485,14 @@ FROM commerce.silver_events;
 echo ""
 
 echo "ClickHouse gold layer:"
+# NOTE: alias must NOT match the column name 'total_events' — if it did,
+# countIf(total_events > 0) would resolve to countIf(sum(...) > 0),
+# which ClickHouse rejects as a nested aggregate (Code 184).
 ch "
 SELECT
-    toString(activity_date) AS date,
-    count()          AS users,
-    sum(total_events) AS total_events,
+    toString(activity_date)  AS date,
+    count()                  AS users,
+    sum(total_events)        AS events_total,
     countIf(total_events > 0) AS users_with_events
 FROM commerce.gold_user_activity
 GROUP BY activity_date

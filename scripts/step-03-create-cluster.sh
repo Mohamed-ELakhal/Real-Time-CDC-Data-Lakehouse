@@ -73,7 +73,7 @@ echo ""
 # Display cluster info
 echo "Cluster Information:"
 echo "-------------------"
-kubectl cluster-info --context kind-data-engineering-challenge
+kubectl cluster-info --context kind-cdc-lakehouse
 
 echo ""
 echo "Nodes:"

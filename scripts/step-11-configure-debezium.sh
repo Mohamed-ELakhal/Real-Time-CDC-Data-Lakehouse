@@ -116,7 +116,7 @@ PG_RESULT=$(kubectl exec "${CONNECT_POD}" -n ${NAMESPACE} -- \
     "database.user":                            "postgres",
     "database.password":                        "postgres",
     "database.dbname":                          "commerce",
-    "database.server.name":                     "postgres",
+    "topic.prefix":                             "postgres",
     "table.include.list":                       "public.users",
     "plugin.name":                              "pgoutput",
     "publication.name":                         "dbz_publication",

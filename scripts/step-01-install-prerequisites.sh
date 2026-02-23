@@ -97,6 +97,41 @@ run_sudo() {
     fi
 }
 
+# ── WSL detection ─────────────────────────────────────────────
+# WSL does not run systemd by default, so 'systemctl' will fail.
+# Use 'service docker start' instead, or launch dockerd directly.
+IS_WSL=false
+detect_wsl() {
+    if grep -qi microsoft /proc/version 2>/dev/null \
+       || grep -qi wsl /proc/version 2>/dev/null \
+       || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        IS_WSL=true
+        log_info "WSL environment detected — will use 'service' instead of 'systemctl'."
+    fi
+}
+
+# Start and enable Docker in a way appropriate for the environment
+start_docker_daemon() {
+    if $IS_WSL; then
+        if command -v service &>/dev/null; then
+            run_sudo service docker start 2>/dev/null || true
+        else
+            # Last resort: launch dockerd directly in background
+            log_info "Starting dockerd directly (no service manager in WSL)..."
+            run_sudo dockerd > /tmp/dockerd.log 2>&1 &
+        fi
+    else
+        # Native Linux with systemd
+        run_sudo systemctl enable docker --quiet 2>/dev/null || true
+        run_sudo systemctl start docker 2>/dev/null || true
+    fi
+    # Wait up to 15s for daemon to respond
+    local waited=0
+    while ! docker info &>/dev/null 2>&1 && [[ $waited -lt 15 ]]; do
+        sleep 1; waited=$((waited + 1))
+    done
+}
+
 # ── Homebrew (macOS) ──────────────────────────────────────────
 ensure_homebrew() {
     if [[ "$OS_TYPE" != "macos" ]]; then return; fi
@@ -192,8 +227,7 @@ install_docker() {
                 docker-buildx-plugin docker-compose-plugin
             # Add current user to docker group (avoids sudo for docker commands)
             run_sudo usermod -aG docker "${USER}" 2>/dev/null || true
-            run_sudo systemctl enable docker --quiet
-            run_sudo systemctl start docker
+            start_docker_daemon
             log_ok "Docker Engine installed and started."
             log_warn "You may need to log out and back in for group membership to take effect."
             log_warn "Or run: newgrp docker"
@@ -213,8 +247,7 @@ install_docker() {
             run_sudo "$PKG_MGR" install -y docker-ce docker-ce-cli containerd.io \
                 docker-buildx-plugin docker-compose-plugin
             run_sudo usermod -aG docker "${USER}" 2>/dev/null || true
-            run_sudo systemctl enable docker --quiet
-            run_sudo systemctl start docker
+            start_docker_daemon
             log_ok "Docker Engine installed and started."
             INSTALLED+=("docker")
             ;;
@@ -223,8 +256,7 @@ install_docker() {
             log_info "Installing Docker via pacman..."
             run_sudo pacman -Sy --noconfirm docker docker-compose
             run_sudo usermod -aG docker "${USER}" 2>/dev/null || true
-            run_sudo systemctl enable docker --quiet
-            run_sudo systemctl start docker
+            start_docker_daemon
             log_ok "Docker installed."
             INSTALLED+=("docker")
             ;;
@@ -514,6 +546,7 @@ verify_all() {
 # ── Main ──────────────────────────────────────────────────────
 main() {
     detect_os
+    detect_wsl
     check_sudo
 
     ensure_homebrew
